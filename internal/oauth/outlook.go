@@ -225,7 +225,7 @@ func (h *OutlookHandler) HandleCallback(w http.ResponseWriter, r *http.Request) 
 
 	_, err = h.dbPool.Exec(r.Context(), `
 		UPDATE master.email_accounts
-		SET credentials = $1, status = 'ACTIVE', provider = 'outlook', last_error = NULL, updated_at = NOW()
+		SET credentials = $1, status = 'ACTIVE', provider = 'outlook', last_sync_at = NOW(), last_error = NULL, updated_at = NOW()
 		WHERE id = $2
 	`, string(credsBytes), acc.ID)
 	if err != nil {

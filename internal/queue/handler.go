@@ -49,8 +49,9 @@ type FetchTaskPayload struct {
 }
 
 type MSGraphMessageHeader struct {
-	Subject string `json:"subject"`
-	From    struct {
+	Subject          string    `json:"subject"`
+	ReceivedDateTime time.Time `json:"receivedDateTime"`
+	From             struct {
 		EmailAddress struct {
 			Address string `json:"address"`
 			Name    string `json:"name"`
@@ -74,9 +75,10 @@ type OutlookRefreshResponse struct {
 
 // Google specific API structures
 type GmailMessageMetadata struct {
-	ID        string `json:"id"`
-	HistoryID string `json:"historyId"`
-	Payload   struct {
+	ID           string `json:"id"`
+	HistoryID    string `json:"historyId"`
+	InternalDate string `json:"internalDate"`
+	Payload      struct {
 		Headers []struct {
 			Name  string `json:"name"`
 			Value string `json:"value"`
@@ -199,8 +201,8 @@ func (h *TaskHandler) HandleOutlookFetch(ctx context.Context, t *asynq.Task, pay
 		accessToken = refreshedCreds.AccessToken
 	}
 
-	// Fetch message headers: subject and from
-	reqURL := fmt.Sprintf("https://graph.microsoft.com/v1.0/users/%s/messages/%s?$select=subject,from", url.PathEscape(payload.Email), url.PathEscape(payload.MessageID))
+	// Fetch message headers: subject, from, and receivedDateTime
+	reqURL := fmt.Sprintf("https://graph.microsoft.com/v1.0/users/%s/messages/%s?$select=subject,from,receivedDateTime", url.PathEscape(payload.Email), url.PathEscape(payload.MessageID))
 	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
 	if err != nil {
 		return err
@@ -237,6 +239,19 @@ func (h *TaskHandler) HandleOutlookFetch(ctx context.Context, t *asynq.Task, pay
 	var header MSGraphMessageHeader
 	if err := json.NewDecoder(resp.Body).Decode(&header); err != nil {
 		return err
+	}
+
+	// Compute time window filter start: max(LastSyncAt, now - 10 minutes)
+	now := time.Now()
+	tenMinutesAgo := now.Add(-10 * time.Minute)
+	filterStart := tenMinutesAgo
+	if acc.LastSyncAt != nil && acc.LastSyncAt.After(tenMinutesAgo) {
+		filterStart = *acc.LastSyncAt
+	}
+
+	if header.ReceivedDateTime.Before(filterStart) {
+		slog.Info("Outlook message is older than filter start time, skipping", "message_id", payload.MessageID, "received", header.ReceivedDateTime, "filter_start", filterStart, "email", acc.Email)
+		return nil
 	}
 
 	rules, err := h.ruleCache.GetRules(ctx, acc.TenantID)
@@ -297,9 +312,9 @@ func (h *TaskHandler) HandleOutlookFetch(ctx context.Context, t *asynq.Task, pay
 	processPayload := map[string]interface{}{
 		"tenant_id":  acc.TenantID,
 		"account_id": acc.ID,
-		"from":       header.From.EmailAddress.Address,
+		"from":       acc.Email, // Store mailbox recipient email address as "from_email"
 		"subject":    header.Subject,
-		"date":       time.Now().Format(time.RFC3339),
+		"date":       header.ReceivedDateTime.Format(time.RFC3339), // Store true received date
 		"body_text":  msgBody.Body.Content,
 	}
 
@@ -406,10 +421,17 @@ func (h *TaskHandler) HandleGmailFetch(ctx context.Context, t *asynq.Task, paylo
 		}
 	}
 
-	// 2. Fallback: list messages from the last day
+	// Compute time window filter start: max(LastSyncAt, now - 10 minutes)
+	now := time.Now()
+	tenMinutesAgo := now.Add(-10 * time.Minute)
+	filterStart := tenMinutesAgo
+	if acc.LastSyncAt != nil && acc.LastSyncAt.After(tenMinutesAgo) {
+		filterStart = *acc.LastSyncAt
+	}
+
+	// 2. Fallback: list messages from the filterStart time window
 	if len(messageIDs) == 0 {
-		yesterday := time.Now().AddDate(0, 0, -1).Format("2006/01/02")
-		listURL := fmt.Sprintf("https://gmail.googleapis.com/gmail/v1/users/me/messages?q=after:%s", url.QueryEscape(yesterday))
+		listURL := fmt.Sprintf("https://gmail.googleapis.com/gmail/v1/users/me/messages?q=after:%d", filterStart.Unix())
 		req, _ := http.NewRequestWithContext(ctx, "GET", listURL, nil)
 		req.Header.Set("Authorization", "Bearer "+accessToken)
 
@@ -503,17 +525,22 @@ func (h *TaskHandler) HandleGmailFetch(ctx context.Context, t *asynq.Task, paylo
 		json.NewDecoder(resp.Body).Decode(&meta)
 		resp.Body.Close()
 
+		ms, _ := strconv.ParseInt(meta.InternalDate, 10, 64)
+		receivedTime := time.Unix(0, ms*int64(time.Millisecond))
+
+		if receivedTime.Before(filterStart) {
+			slog.Info("Gmail message is older than filter start time, skipping", "message_id", msgID, "received", receivedTime, "filter_start", filterStart, "email", acc.Email)
+			continue
+		}
+
 		if meta.HistoryID > latestHistoryIDStr {
 			latestHistoryIDStr = meta.HistoryID
 		}
 
-		var subject, from string
+		var subject string
 		for _, header := range meta.Payload.Headers {
 			if strings.EqualFold(header.Name, "Subject") {
 				subject = header.Value
-			}
-			if strings.EqualFold(header.Name, "From") {
-				from = header.Value
 			}
 		}
 
@@ -569,9 +596,9 @@ func (h *TaskHandler) HandleGmailFetch(ctx context.Context, t *asynq.Task, paylo
 		processPayload := map[string]interface{}{
 			"tenant_id":  acc.TenantID,
 			"account_id": acc.ID,
-			"from":       from,
+			"from":       acc.Email, // Store mailbox recipient email address as "from_email"
 			"subject":    subject,
-			"date":       time.Now().Format(time.RFC3339),
+			"date":       receivedTime.Format(time.RFC3339), // Store true received date
 			"body_text":  bodyContent,
 		}
 		processBytes, _ := json.Marshal(processPayload)
@@ -669,6 +696,14 @@ func (h *TaskHandler) HandleIMAPFetch(ctx context.Context, t *asynq.Task, payloa
 		return fmt.Errorf("failed to load tenant subject rules: %w", err)
 	}
 
+	// Compute time window filter start: max(LastSyncAt, now - 10 minutes)
+	now := time.Now()
+	tenMinutesAgo := now.Add(-10 * time.Minute)
+	filterStart := tenMinutesAgo
+	if acc.LastSyncAt != nil && acc.LastSyncAt.After(tenMinutesAgo) {
+		filterStart = *acc.LastSyncAt
+	}
+
 	// 2. Filter messages and fetch matching bodies (Header-Only Pre-Filtering + Attachment Bypass)
 	for _, msg := range messages {
 		if msg.Envelope == nil {
@@ -688,11 +723,12 @@ func (h *TaskHandler) HandleIMAPFetch(ctx context.Context, t *asynq.Task, payloa
 			continue
 		}
 
-		subject := msg.Envelope.Subject
-		var from string
-		if len(msg.Envelope.From) > 0 {
-			from = msg.Envelope.From[0].MailboxName + "@" + msg.Envelope.From[0].HostName
+		if msg.Envelope.Date.Before(filterStart) {
+			slog.Info("IMAP message is older than filter start time, skipping", "email", acc.Email, "received", msg.Envelope.Date, "filter_start", filterStart)
+			continue
 		}
+
+		subject := msg.Envelope.Subject
 
 		// Match rules
 		var matchedRule *model.SubjectRule
@@ -749,9 +785,9 @@ func (h *TaskHandler) HandleIMAPFetch(ctx context.Context, t *asynq.Task, payloa
 		processPayload := map[string]interface{}{
 			"tenant_id":  acc.TenantID,
 			"account_id": acc.ID,
-			"from":       from,
+			"from":       acc.Email, // Store mailbox recipient email address as "from_email"
 			"subject":    subject,
-			"date":       time.Now().Format(time.RFC3339),
+			"date":       msg.Envelope.Date.Format(time.RFC3339), // Store true received date
 			"body_text":  string(bodyBytes),
 		}
 		processBytes, _ := json.Marshal(processPayload)
@@ -826,6 +862,16 @@ func (h *TaskHandler) HandleEmailProcessTask(ctx context.Context, t *asynq.Task)
 	if err != nil {
 		slog.Error("Failed to insert parsed email message into tenant hypertable", "tenant", payload.TenantID, "error", err)
 		return fmt.Errorf("database insert failed: %w", err)
+	}
+
+	// Update last_sync_at to the date of the processed email (only if it is newer)
+	_, err = h.dbPool.Exec(ctx, `
+		UPDATE master.email_accounts
+		SET last_sync_at = $1
+		WHERE id = $2 AND (last_sync_at IS NULL OR last_sync_at < $1)
+	`, parsedDate, payload.AccountID)
+	if err != nil {
+		slog.Error("Failed to update last_sync_at for email account", "account", payload.AccountID, "error", err)
 	}
 
 	// 6. Broadcast push notification to Redis Pub/Sub to trigger monolith Websocket rooms
