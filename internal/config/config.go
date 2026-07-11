@@ -22,7 +22,7 @@ func LoadConfig() *Config {
 	return &Config{
 		DatabaseURL:         getEnv("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/atlas?sslmode=disable"),
 		RedisURL:            getEnv("REDIS_URL", "redis://localhost:6379/0"),
-		Port:                getEnv("PORT", "8080"),
+		Port:                getEnv("PORT", "5001"),
 		OutlookClientID:     os.Getenv("OUTLOOK_CLIENT_ID"),
 		OutlookClientSecret: os.Getenv("OUTLOOK_CLIENT_SECRET"),
 		EnableGmail:         getEnvBool("ENABLE_GMAIL", true),
