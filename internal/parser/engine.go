@@ -46,7 +46,7 @@ func ExtractData(normalizedText string, extractMethod string) (string, error) {
 
 	case "NETFLIX_URL_EXTRACT":
 		// Match Netflix password reset/login/verify URLs specifically
-		re := regexp.MustCompile(`https://www\.netflix\.com/(?:password|account/update-primary-location|account/travel/verify|verifyemail|YourAccount)[^\s>\]]*`)
+		re := regexp.MustCompile(`https://www\.netflix\.com/(?:password|account/update-primary-location|account/travel/verify|verifyemail|YourAccount)[^\s>\]"']*`)
 		match := re.FindString(normalizedText)
 		if match == "" {
 			return "", fmt.Errorf("no Netflix URL matching pattern found")
