@@ -123,7 +123,7 @@ func main() {
 			webhook.SetupGoogleWebhookRoutes(r, qClient)
 		}
 		if cfg.EnableOutlook {
-			webhook.SetupOutlookWebhookRoutes(r, qClient)
+			webhook.SetupOutlookWebhookRoutes(r, dbPool, qClient)
 		}
 	})
 

@@ -7,21 +7,25 @@ import (
 	"net/http"
 	"strings"
 
+	"atlas-emailagg/internal/db"
 	"atlas-emailagg/internal/queue"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/hibiken/asynq"
+	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // SetupOutlookWebhookRoutes registers push notification webhook routes for Outlook.
-func SetupOutlookWebhookRoutes(r chi.Router, qClient *queue.QueueClient) {
+func SetupOutlookWebhookRoutes(r chi.Router, dbPool *pgxpool.Pool, qClient *queue.QueueClient) {
 	handler := &OutlookWebhookHandler{
+		dbPool:      dbPool,
 		queueClient: qClient,
 	}
 	r.Post("/outlook", handler.HandleWebhook)
 }
 
 type OutlookWebhookHandler struct {
+	dbPool      *pgxpool.Pool
 	queueClient *queue.QueueClient
 }
 
@@ -72,14 +76,26 @@ func (h *OutlookWebhookHandler) HandleWebhook(w http.ResponseWriter, r *http.Req
 			continue
 		}
 
-		// Resource format: Users/user-email@outlook.com/Messages/message-id
-		parts := strings.Split(notification.Resource, "/")
-		if len(parts) < 4 || strings.ToLower(parts[0]) != "users" {
-			slog.Warn("Unexpected resource path format in Outlook notification", "resource", notification.Resource)
+		var email string
+		acc, err := db.GetEmailAccountBySubscriptionID(r.Context(), h.dbPool, notification.SubscriptionID)
+		if err != nil {
+			slog.Error("Database subscription ID lookup failed", "error", err, "subscription_id", notification.SubscriptionID)
+		}
+		if acc != nil {
+			email = acc.Email
+		} else {
+			// Fallback: parse from resource path format (Users/user-email@outlook.com/Messages/message-id)
+			parts := strings.Split(notification.Resource, "/")
+			if len(parts) >= 2 && strings.ToLower(parts[0]) == "users" {
+				email = strings.ToLower(parts[1])
+			}
+		}
+
+		if email == "" || strings.Contains(email, "/") {
+			slog.Warn("Failed to resolve email address for Outlook notification", "subscription_id", notification.SubscriptionID, "resource", notification.Resource)
 			continue
 		}
 
-		email := strings.ToLower(parts[1])
 		messageID := notification.ResourceData.ID
 
 		slog.Info("Outlook webhook notification received", "email", email, "message_id", messageID)

@@ -194,5 +194,37 @@ func GetActiveIMAPAccounts(ctx context.Context, pool *pgxpool.Pool) ([]model.Ema
 	return accounts, nil
 }
 
+// GetEmailAccountBySubscriptionID retrieves an Outlook email account by its webhook Subscription ID.
+func GetEmailAccountBySubscriptionID(ctx context.Context, pool *pgxpool.Pool, subID string) (*model.EmailAccount, error) {
+	query := `
+		SELECT id, tenant_id, email, provider, status, gcp_project_id, credentials, last_sync_at, last_error, created_at, updated_at
+		FROM master.email_accounts
+		WHERE provider = 'outlook' AND credentials LIKE '%' || $1 || '%'
+	`
+	row := pool.QueryRow(ctx, query, subID)
+
+	var acc model.EmailAccount
+	err := row.Scan(
+		&acc.ID,
+		&acc.TenantID,
+		&acc.Email,
+		&acc.Provider,
+		&acc.Status,
+		&acc.GCPProjectID,
+		&acc.Credentials,
+		&acc.LastSyncAt,
+		&acc.LastError,
+		&acc.CreatedAt,
+		&acc.UpdatedAt,
+	)
+	if err == pgx.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to scan email account by subscription ID: %w", err)
+	}
+	return &acc, nil
+}
+
 
 
