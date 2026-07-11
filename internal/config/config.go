@@ -14,6 +14,7 @@ type Config struct {
 	EnableGmail         bool
 	EnableOutlook       bool
 	EnableIMAP          bool
+	GCPPubSubTopic      string
 }
 
 // LoadConfig reads configuration from environment variables with sane defaults.
@@ -27,6 +28,7 @@ func LoadConfig() *Config {
 		EnableGmail:         getEnvBool("ENABLE_GMAIL", true),
 		EnableOutlook:       getEnvBool("ENABLE_OUTLOOK", true),
 		EnableIMAP:          getEnvBool("ENABLE_IMAP", true),
+		GCPPubSubTopic:      getEnv("GCP_PUBSUB_TOPIC", "gmail-notifications"),
 	}
 }
 

@@ -244,7 +244,7 @@ func (h *GoogleHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	// 5. Register Gmail Push Notification (users.watch)
 	watchURL := "https://gmail.googleapis.com/gmail/v1/users/me/watch"
 	watchPayload := map[string]string{
-		"topicName": fmt.Sprintf("projects/%s/topics/gmail-notifications", gcpProj.ProjectName),
+		"topicName": fmt.Sprintf("projects/%s/topics/%s", gcpProj.ProjectName, h.cfg.GCPPubSubTopic),
 	}
 	watchBytes, _ := json.Marshal(watchPayload)
 
@@ -257,8 +257,20 @@ func (h *GoogleHandler) HandleCallback(w http.ResponseWriter, r *http.Request) {
 	if err == nil && watchResp.StatusCode == http.StatusOK {
 		json.NewDecoder(watchResp.Body).Decode(&watch)
 		watchResp.Body.Close()
-	} else if watchResp != nil {
-		watchResp.Body.Close()
+	} else {
+		var errMsg string
+		if watchResp != nil {
+			bodyBytes, _ := io.ReadAll(watchResp.Body)
+			errMsg = fmt.Sprintf("status %s, body: %s", watchResp.Status, string(bodyBytes))
+			watchResp.Body.Close()
+		} else if err != nil {
+			errMsg = err.Error()
+		} else {
+			errMsg = "unknown error"
+		}
+		slog.Error("Failed to register Gmail watch subscription during OAuth flow", "error", errMsg, "email", acc.Email)
+		http.Error(w, "Failed to register Gmail push notifications on Google Cloud. Please check Pub/Sub topic and permissions.", http.StatusBadGateway)
+		return
 	}
 
 	// Determine starting history ID

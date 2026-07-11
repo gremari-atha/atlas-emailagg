@@ -132,7 +132,7 @@ func (sr *SubscriptionRenewer) renewGmailWatches(ctx context.Context, maxScore i
 
 		watchURL := "https://gmail.googleapis.com/gmail/v1/users/me/watch"
 		watchPayload := map[string]string{
-			"topicName": fmt.Sprintf("projects/%s/topics/gmail-notifications", gcpProjName),
+			"topicName": fmt.Sprintf("projects/%s/topics/%s", gcpProjName, sr.cfg.GCPPubSubTopic),
 		}
 		watchBytes, _ := json.Marshal(watchPayload)
 
