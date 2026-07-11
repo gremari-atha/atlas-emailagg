@@ -29,9 +29,15 @@ func SetupGoogleRoutes(r chi.Router, dbPool *pgxpool.Pool, qClient *queue.QueueC
 		queueClient: qClient,
 		cfg:         cfg,
 	}
+	// Default Google routes
 	r.Get("/google/connect", handler.HandleConnect)
 	r.Get("/google/callback", handler.HandleCallback)
 	r.Post("/google/revoke", handler.HandleRevoke)
+
+	// Gmail alias routes matching dashboard provider name
+	r.Get("/gmail/connect", handler.HandleConnect)
+	r.Get("/gmail/callback", handler.HandleCallback)
+	r.Post("/gmail/revoke", handler.HandleRevoke)
 }
 
 type GoogleHandler struct {
