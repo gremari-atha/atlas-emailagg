@@ -223,7 +223,11 @@ func (h *OutlookHandler) HandleCallback(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	err = db.UpdateEmailAccountCredentialsAndStatus(r.Context(), h.dbPool, acc.ID, string(credsBytes), "ACTIVE")
+	_, err = h.dbPool.Exec(r.Context(), `
+		UPDATE master.email_accounts
+		SET credentials = $1, status = 'ACTIVE', provider = 'outlook', last_error = NULL, updated_at = NOW()
+		WHERE id = $2
+	`, string(credsBytes), acc.ID)
 	if err != nil {
 		slog.Error("Failed to save credentials in database", "error", err)
 		http.Error(w, "Internal database error", http.StatusInternalServerError)
