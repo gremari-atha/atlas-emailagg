@@ -77,7 +77,7 @@ func (h *OutlookHandler) HandleConnect(w http.ResponseWriter, r *http.Request) {
 		"https://login.microsoftonline.com/common/oauth2/v2.0/authorize?client_id=%s&response_type=code&redirect_uri=%s&response_mode=query&scope=%s&state=%s",
 		url.QueryEscape(h.cfg.OutlookClientID),
 		url.QueryEscape(redirectURI),
-		url.QueryEscape("https://graph.microsoft.com/Mail.Read offline_access"),
+		url.QueryEscape("https://graph.microsoft.com/Mail.Read https://graph.microsoft.com/User.Read offline_access"),
 		url.QueryEscape(state),
 	)
 
@@ -157,7 +157,7 @@ func (h *OutlookHandler) HandleCallback(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "Internal server error", http.StatusInternalServerError)
 		return
 	}
-	profileReq.Header.Set("Authorization", fmt.Sprintf("%s %s", tokenResp.TokenType, tokenResp.AccessToken))
+	profileReq.Header.Set("Authorization", "Bearer "+tokenResp.AccessToken)
 
 	profileResp, err := http.DefaultClient.Do(profileReq)
 	if err != nil {
