@@ -1,0 +1,6 @@
+server
+.env
+*.log
+tmp/
+dist/
+provider-info
