@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -112,7 +113,13 @@ func (sr *SubscriptionRenewer) renewGmailWatches(ctx context.Context, maxScore i
 		}
 
 		if resp.StatusCode != http.StatusOK {
+			respBytes, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
+			slog.Error("Gmail token refresh in renewer rejected by OAuth server", "email", acc.Email, "status", resp.Status, "body", string(respBytes))
+			if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+				db.UpdateEmailAccountStatus(ctx, sr.dbPool, acc.ID, "REAUTH_REQUIRED", fmt.Sprintf("OAuth token refresh failed: status %s, body %s", resp.Status, string(respBytes)))
+				sr.publishStatusChange(ctx, acc.TenantID, acc.Email, "REAUTH_REQUIRED")
+			}
 			continue
 		}
 
@@ -162,9 +169,16 @@ func (sr *SubscriptionRenewer) renewGmailWatches(ctx context.Context, maxScore i
 			slog.Info("Successfully renewed Gmail watch", "email", acc.Email, "expiry", time.Unix(newExpSec, 0))
 		} else {
 			if watchResp != nil {
+				respBytes, _ := io.ReadAll(watchResp.Body)
 				watchResp.Body.Close()
+				slog.Error("Gmail watch renewal rejected by API", "email", acc.Email, "status", watchResp.Status, "body", string(respBytes))
+				if watchResp.StatusCode >= 400 && watchResp.StatusCode < 500 {
+					db.UpdateEmailAccountStatus(ctx, sr.dbPool, acc.ID, "REAUTH_REQUIRED", fmt.Sprintf("Gmail watch renewal returned status %s: %s", watchResp.Status, string(respBytes)))
+					sr.publishStatusChange(ctx, acc.TenantID, acc.Email, "REAUTH_REQUIRED")
+				}
+			} else {
+				slog.Warn("Failed to execute Gmail watch renewal request (no response)", "email", acc.Email)
 			}
-			slog.Warn("Failed to execute Gmail watch renewal request", "email", acc.Email)
 		}
 	}
 }
@@ -207,7 +221,13 @@ func (sr *SubscriptionRenewer) renewOutlookSubscriptions(ctx context.Context, ma
 			continue
 		}
 		if resp.StatusCode != http.StatusOK {
+			respBytes, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
+			slog.Error("Outlook token refresh in renewer rejected by OAuth server", "email", acc.Email, "status", resp.Status, "body", string(respBytes))
+			if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+				db.UpdateEmailAccountStatus(ctx, sr.dbPool, acc.ID, "REAUTH_REQUIRED", fmt.Sprintf("OAuth token refresh failed: status %s, body %s", resp.Status, string(respBytes)))
+				sr.publishStatusChange(ctx, acc.TenantID, acc.Email, "REAUTH_REQUIRED")
+			}
 			continue
 		}
 
@@ -291,9 +311,16 @@ func (sr *SubscriptionRenewer) renewOutlookSubscriptions(ctx context.Context, ma
 				slog.Info("Successfully recreated Outlook subscription", "email", acc.Email, "sub_id", subObj.ID)
 			} else {
 				if subResp != nil {
+					respBytes, _ := io.ReadAll(subResp.Body)
 					subResp.Body.Close()
+					slog.Error("Recreating Outlook subscription failed", "email", acc.Email, "status", subResp.Status, "body", string(respBytes))
+					if subResp.StatusCode >= 400 && subResp.StatusCode < 500 {
+						db.UpdateEmailAccountStatus(ctx, sr.dbPool, acc.ID, "REAUTH_REQUIRED", fmt.Sprintf("Outlook recreation subscription failed: status %s, body %s", subResp.Status, string(respBytes)))
+						sr.publishStatusChange(ctx, acc.TenantID, acc.Email, "REAUTH_REQUIRED")
+					}
+				} else {
+					slog.Error("Recreating Outlook subscription failed (no response)", "email", acc.Email)
 				}
-				slog.Error("Recreating Outlook subscription failed", "email", acc.Email)
 			}
 		}
 	}
@@ -317,5 +344,22 @@ type MicrosoftSubscriptionRequest struct {
 type MicrosoftSubscriptionResponse struct {
 	ID                 string `json:"id"`
 	ExpirationDateTime string `json:"expirationDateTime"`
+}
+
+func (sr *SubscriptionRenewer) publishStatusChange(ctx context.Context, tenantID, email, status string) {
+	broadcastChannel := "email_events:broadcast"
+	replacer := strings.NewReplacer(".", "_", "@", "_")
+	sanitizedEmail := replacer.Replace(strings.ToLower(email))
+
+	eventPayload := map[string]string{
+		"tenant_id": tenantID,
+		"from":      sanitizedEmail,
+		"date":      time.Now().Format(time.RFC3339),
+		"subject":   "status_changed",
+		"context":   "connection-status-changed",
+		"data":      status,
+	}
+	eventBytes, _ := json.Marshal(eventPayload)
+	sr.queueClient.RedisClient.Publish(ctx, broadcastChannel, string(eventBytes))
 }
 

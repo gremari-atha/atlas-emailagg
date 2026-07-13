@@ -275,8 +275,8 @@ func (p *IMAPPool) broadcastSuspension(ctx context.Context, acc model.EmailAccou
 		"from":      acc.Email,
 		"date":      time.Now().Format(time.RFC3339),
 		"subject":   "System",
-		"context":   "connection-suspended",
-		"data":      errMsg,
+		"context":   "connection-status-changed",
+		"data":      "CONNECTION_SUSPENDED",
 	}
 	eventBytes, _ := json.Marshal(eventPayload)
 	p.qClient.RedisClient.Publish(ctx, broadcastChannel, string(eventBytes))

@@ -191,6 +191,7 @@ func (h *TaskHandler) HandleOutlookFetch(ctx context.Context, t *asynq.Task, pay
 		if err != nil {
 			slog.Error("Failed to refresh Outlook access token", "error", err, "email", acc.Email)
 			db.UpdateEmailAccountStatus(ctx, h.dbPool, acc.ID, "REAUTH_REQUIRED", "OAuth token refresh failed: "+err.Error())
+			h.publishStatusChange(ctx, acc.TenantID, acc.Email, "REAUTH_REQUIRED")
 			return err
 		}
 
@@ -214,6 +215,14 @@ func (h *TaskHandler) HandleOutlookFetch(ctx context.Context, t *asynq.Task, pay
 		return fmt.Errorf("MS Graph header request failed: %w", err)
 	}
 	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		slog.Error("Outlook Graph API header request unauthorized/forbidden, token revoked", "email", acc.Email, "status", resp.Status, "body", string(bodyBytes))
+		db.UpdateEmailAccountStatus(ctx, h.dbPool, acc.ID, "REAUTH_REQUIRED", fmt.Sprintf("Graph API header request failed: status %s, body %s", resp.Status, string(bodyBytes)))
+		h.publishStatusChange(ctx, acc.TenantID, acc.Email, "REAUTH_REQUIRED")
+		return nil
+	}
 
 	if resp.StatusCode == http.StatusTooManyRequests {
 		retryAfter := 10 // default
@@ -299,6 +308,13 @@ func (h *TaskHandler) HandleOutlookFetch(ctx context.Context, t *asynq.Task, pay
 		return nil
 	}
 
+	if bodyResp.StatusCode == http.StatusUnauthorized || bodyResp.StatusCode == http.StatusForbidden {
+		bodyBytes, _ := io.ReadAll(bodyResp.Body)
+		slog.Error("Outlook Graph API body request unauthorized/forbidden, token revoked", "email", acc.Email, "status", bodyResp.Status, "body", string(bodyBytes))
+		db.UpdateEmailAccountStatus(ctx, h.dbPool, acc.ID, "REAUTH_REQUIRED", fmt.Sprintf("Graph API body request failed: status %s, body %s", bodyResp.Status, string(bodyBytes)))
+		h.publishStatusChange(ctx, acc.TenantID, acc.Email, "REAUTH_REQUIRED")
+		return nil
+	}
 	if bodyResp.StatusCode != http.StatusOK {
 		bodyBytes, _ := io.ReadAll(bodyResp.Body)
 		return fmt.Errorf("failed to fetch email body, status: %s, body: %s", bodyResp.Status, string(bodyBytes))
@@ -365,6 +381,7 @@ func (h *TaskHandler) HandleGmailFetch(ctx context.Context, t *asynq.Task, paylo
 		if err != nil {
 			slog.Error("Failed to refresh Gmail access token", "error", err, "email", acc.Email)
 			db.UpdateEmailAccountStatus(ctx, h.dbPool, acc.ID, "REAUTH_REQUIRED", "OAuth token refresh failed: "+err.Error())
+			h.publishStatusChange(ctx, acc.TenantID, acc.Email, "REAUTH_REQUIRED")
 			return err
 		}
 		creds.AccessToken = newTokens.AccessToken
@@ -453,6 +470,14 @@ func (h *TaskHandler) HandleGmailFetch(ctx context.Context, t *asynq.Task, paylo
 			return nil
 		}
 
+		if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+			bodyBytes, _ := io.ReadAll(resp.Body)
+			slog.Error("Gmail List API request unauthorized/forbidden, token revoked", "email", acc.Email, "status", resp.Status, "body", string(bodyBytes))
+			db.UpdateEmailAccountStatus(ctx, h.dbPool, acc.ID, "REAUTH_REQUIRED", fmt.Sprintf("Gmail List API failed: status %s, body %s", resp.Status, string(bodyBytes)))
+			h.publishStatusChange(ctx, acc.TenantID, acc.Email, "REAUTH_REQUIRED")
+			return nil
+		}
+
 		if resp.StatusCode == http.StatusOK {
 			var listResp GmailListResponse
 			if err := json.NewDecoder(resp.Body).Decode(&listResp); err == nil {
@@ -513,6 +538,14 @@ func (h *TaskHandler) HandleGmailFetch(ctx context.Context, t *asynq.Task, paylo
 				return nil
 			}
 
+			if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+				bodyBytes, _ := io.ReadAll(resp.Body)
+				resp.Body.Close()
+				slog.Error("Gmail Metadata API request unauthorized/forbidden, token revoked", "email", acc.Email, "status", resp.Status, "body", string(bodyBytes))
+				db.UpdateEmailAccountStatus(ctx, h.dbPool, acc.ID, "REAUTH_REQUIRED", fmt.Sprintf("Gmail Metadata API failed: status %s, body %s", resp.Status, string(bodyBytes)))
+				h.publishStatusChange(ctx, acc.TenantID, acc.Email, "REAUTH_REQUIRED")
+				return nil
+			}
 			if resp.StatusCode != http.StatusOK {
 				resp.Body.Close()
 				continue
@@ -578,6 +611,14 @@ func (h *TaskHandler) HandleGmailFetch(ctx context.Context, t *asynq.Task, paylo
 				return nil
 			}
 
+			if fullResp.StatusCode == http.StatusUnauthorized || fullResp.StatusCode == http.StatusForbidden {
+				bodyBytes, _ := io.ReadAll(fullResp.Body)
+				fullResp.Body.Close()
+				slog.Error("Gmail Full Body API request unauthorized/forbidden, token revoked", "email", acc.Email, "status", fullResp.Status, "body", string(bodyBytes))
+				db.UpdateEmailAccountStatus(ctx, h.dbPool, acc.ID, "REAUTH_REQUIRED", fmt.Sprintf("Gmail Full Body API failed: status %s, body %s", fullResp.Status, string(bodyBytes)))
+				h.publishStatusChange(ctx, acc.TenantID, acc.Email, "REAUTH_REQUIRED")
+				return nil
+			}
 			if fullResp.StatusCode != http.StatusOK {
 				fullResp.Body.Close()
 				continue
@@ -1224,4 +1265,21 @@ func (h *TaskHandler) isDuplicateMessage(ctx context.Context, messageID string) 
 		return false, fmt.Errorf("failed to check/set message deduplication key in Redis: %w", err)
 	}
 	return !res, nil
+}
+
+func (h *TaskHandler) publishStatusChange(ctx context.Context, tenantID, email, status string) {
+	broadcastChannel := "email_events:broadcast"
+	replacer := strings.NewReplacer(".", "_", "@", "_")
+	sanitizedEmail := replacer.Replace(strings.ToLower(email))
+
+	eventPayload := map[string]string{
+		"tenant_id": tenantID,
+		"from":      sanitizedEmail,
+		"date":      time.Now().Format(time.RFC3339),
+		"subject":   "status_changed",
+		"context":   "connection-status-changed",
+		"data":      status,
+	}
+	eventBytes, _ := json.Marshal(eventPayload)
+	h.queueClient.RedisClient.Publish(ctx, broadcastChannel, string(eventBytes))
 }
