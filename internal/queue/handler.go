@@ -146,6 +146,8 @@ func (h *TaskHandler) HandleEmailFetchTask(ctx context.Context, t *asynq.Task) e
 		return h.HandleGmailFetch(ctx, t, payload)
 	case "imap":
 		return h.HandleIMAPFetch(ctx, t, payload)
+	case "resend":
+		return h.HandleResendFetch(ctx, t, payload)
 	default:
 		slog.Warn("Unsupported provider in fetch task", "provider", payload.Provider)
 		return nil
@@ -347,6 +349,157 @@ func (h *TaskHandler) HandleOutlookFetch(ctx context.Context, t *asynq.Task, pay
 	}
 
 	slog.Info("Successfully enqueued email process task", "email", payload.Email, "subject", header.Subject)
+	return nil
+}
+
+type ResendReceivedEmail struct {
+	ID        string    `json:"id"`
+	To        []string  `json:"to"`
+	From      string    `json:"from"`
+	CreatedAt time.Time `json:"created_at"`
+	Subject   string    `json:"subject"`
+	HTML      string    `json:"html"`
+	Text      *string   `json:"text"`
+}
+
+func (h *TaskHandler) HandleResendFetch(ctx context.Context, t *asynq.Task, payload FetchTaskPayload) error {
+	acc, err := db.GetEmailAccountByEmailAndProvider(ctx, h.dbPool, payload.Email, "resend")
+	if err != nil {
+		return fmt.Errorf("db fetch email account failed: %w", err)
+	}
+	if acc == nil {
+		slog.Warn("Active Resend email account not found in database", "email", payload.Email)
+		return nil
+	}
+
+	// Deduplication check
+	isDup, err := h.isDuplicateMessage(ctx, payload.MessageID)
+	if err != nil {
+		slog.Error("Deduplication check failed", "error", err, "message_id", payload.MessageID)
+	} else if isDup {
+		slog.Info("Resend message already processed (duplicate), skipping", "message_id", payload.MessageID, "email", payload.Email)
+		return nil
+	}
+
+	var creds struct {
+		APIKey string `json:"api_key"`
+	}
+	if err := json.Unmarshal([]byte(acc.Credentials), &creds); err != nil {
+		return fmt.Errorf("failed to parse credentials JSON: %w", err)
+	}
+
+	// Fetch received email from Resend API
+	reqURL := fmt.Sprintf("https://api.resend.com/emails/receiving/%s", payload.MessageID)
+	req, err := http.NewRequestWithContext(ctx, "GET", reqURL, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+creds.APIKey)
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("Resend receiving email API request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		slog.Error("Resend API request unauthorized/forbidden, API key revoked", "email", acc.Email, "status", resp.Status, "body", string(bodyBytes))
+		db.UpdateEmailAccountStatus(ctx, h.dbPool, acc.ID, "REAUTH_REQUIRED", fmt.Sprintf("Resend API failed: status %s, body %s", resp.Status, string(bodyBytes)))
+		h.publishStatusChange(ctx, acc.TenantID, acc.Email, "REAUTH_REQUIRED")
+		return nil
+	}
+
+	if resp.StatusCode == http.StatusTooManyRequests {
+		retryAfter := 10 // default
+		if hValue := resp.Header.Get("Retry-After"); hValue != "" {
+			if seconds, err := strconv.Atoi(hValue); err == nil {
+				retryAfter = seconds
+			}
+		}
+		slog.Warn("Rate limited (429) by Resend API, rescheduling task", "email", payload.Email, "retry_after_seconds", retryAfter)
+		h.rescheduleFetchTask(ctx, t, retryAfter)
+		return nil
+	}
+
+	if resp.StatusCode == http.StatusNotFound {
+		slog.Warn("Message not found in Resend", "message_id", payload.MessageID)
+		return nil
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("failed to fetch received email, status: %s, body: %s", resp.Status, string(bodyBytes))
+	}
+
+	var emailMsg ResendReceivedEmail
+	if err := json.NewDecoder(resp.Body).Decode(&emailMsg); err != nil {
+		return err
+	}
+
+	// Compute time window filter start: max(LastSyncAt, now - 10 minutes)
+	now := time.Now()
+	tenMinutesAgo := now.Add(-10 * time.Minute)
+	filterStart := tenMinutesAgo
+	if acc.LastSyncAt != nil && acc.LastSyncAt.After(tenMinutesAgo) {
+		filterStart = *acc.LastSyncAt
+	}
+
+	if emailMsg.CreatedAt.Before(filterStart) {
+		slog.Info("Resend message is older than filter start time, skipping", "message_id", payload.MessageID, "created_at", emailMsg.CreatedAt, "filter_start", filterStart, "email", acc.Email)
+		return nil
+	}
+
+	rules, err := h.ruleCache.GetRules(ctx, acc.TenantID)
+	if err != nil {
+		return fmt.Errorf("failed to fetch subject rules: %w", err)
+	}
+
+	var matchedRule *model.SubjectRule
+	for _, rule := range rules {
+		if strings.EqualFold(strings.TrimSpace(emailMsg.Subject), strings.TrimSpace(rule.Subject)) {
+			matchedRule = &rule
+			break
+		}
+	}
+
+	if matchedRule == nil {
+		slog.Info("Resend email subject did not match any tenant rules, discarding", "subject", emailMsg.Subject, "tenant", acc.TenantID)
+		return nil
+	}
+
+	slog.Info("Matched subject rule for Resend, processing email...", "subject", emailMsg.Subject, "context", matchedRule.Context)
+
+	// Extract body text
+	bodyText := emailMsg.HTML
+	if emailMsg.Text != nil && *emailMsg.Text != "" {
+		bodyText = *emailMsg.Text
+	}
+
+	processPayload := map[string]interface{}{
+		"context":    matchedRule.Context,
+		"tenant_id":  acc.TenantID,
+		"account_id": acc.ID,
+		"from":       acc.Email,
+		"subject":    emailMsg.Subject,
+		"date":       emailMsg.CreatedAt.Format(time.RFC3339),
+		"body_text":  bodyText,
+	}
+
+	processBytes, err := json.Marshal(processPayload)
+	if err != nil {
+		return err
+	}
+
+	processTask := asynq.NewTask(TypeEmailProcess, processBytes, asynq.Queue("default"))
+	_, err = h.queueClient.AsynqClient.Enqueue(processTask)
+	if err != nil {
+		slog.Error("Failed to enqueue Resend email process task", "error", err)
+		return fmt.Errorf("enqueue process task failed: %w", err)
+	}
+
+	slog.Info("Successfully enqueued Resend email process task", "email", payload.Email, "subject", emailMsg.Subject)
 	return nil
 }
 

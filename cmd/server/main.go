@@ -125,6 +125,7 @@ func main() {
 		if cfg.EnableOutlook {
 			webhook.SetupOutlookWebhookRoutes(r, dbPool, qClient)
 		}
+		webhook.SetupResendWebhookRoutes(r, dbPool, qClient)
 	})
 
 
