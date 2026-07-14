@@ -56,7 +56,6 @@ type IMAPCredentials struct {
 
 type SubjectRule struct {
 	Subject       string `json:"subject"`
-	Context       string `json:"context"`
 	ExtractMethod string `json:"extract_method"`
 }
 

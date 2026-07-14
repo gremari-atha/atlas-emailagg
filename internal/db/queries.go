@@ -120,7 +120,7 @@ func GetEmailAccountByEmailAndProvider(ctx context.Context, pool *pgxpool.Pool, 
 func GetTenantSubjectRules(ctx context.Context, pool *pgxpool.Pool, tenantID string) ([]model.SubjectRule, error) {
 	// Query the schema dynamically using format (TimescaleDB / Postgres requires schema quotes)
 	query := fmt.Sprintf(`
-		SELECT subject, context, extract_method
+		SELECT subject, extract_method
 		FROM "%s".email_subject
 	`, tenantID)
 
@@ -133,7 +133,7 @@ func GetTenantSubjectRules(ctx context.Context, pool *pgxpool.Pool, tenantID str
 	var rules []model.SubjectRule
 	for rows.Next() {
 		var rule model.SubjectRule
-		if err := rows.Scan(&rule.Subject, &rule.Context, &rule.ExtractMethod); err != nil {
+		if err := rows.Scan(&rule.Subject, &rule.ExtractMethod); err != nil {
 			return nil, fmt.Errorf("failed to scan subject rule: %w", err)
 		}
 		rules = append(rules, rule)

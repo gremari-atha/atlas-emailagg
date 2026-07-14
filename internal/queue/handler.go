@@ -283,7 +283,7 @@ func (h *TaskHandler) HandleOutlookFetch(ctx context.Context, t *asynq.Task, pay
 		return nil
 	}
 
-	slog.Info("Matched subject rule, downloading body...", "subject", header.Subject, "context", matchedRule.Context)
+	slog.Info("Matched subject rule, downloading body...", "subject", header.Subject)
 
 	bodyURL := fmt.Sprintf("https://graph.microsoft.com/v1.0/users/%s/messages/%s?$select=body", url.PathEscape(payload.Email), url.PathEscape(payload.MessageID))
 	bodyReq, err := http.NewRequestWithContext(ctx, "GET", bodyURL, nil)
@@ -469,7 +469,7 @@ func (h *TaskHandler) HandleResendFetch(ctx context.Context, t *asynq.Task, payl
 		return nil
 	}
 
-	slog.Info("Matched subject rule for Resend, processing email...", "subject", emailMsg.Subject, "context", matchedRule.Context)
+	slog.Info("Matched subject rule for Resend, processing email...", "subject", emailMsg.Subject)
 
 	// Extract body text
 	bodyText := emailMsg.HTML
@@ -478,7 +478,6 @@ func (h *TaskHandler) HandleResendFetch(ctx context.Context, t *asynq.Task, payl
 	}
 
 	processPayload := map[string]interface{}{
-		"context":    matchedRule.Context,
 		"tenant_id":  acc.TenantID,
 		"account_id": acc.ID,
 		"from":       acc.Email,
@@ -1039,12 +1038,12 @@ func (h *TaskHandler) HandleEmailProcessTask(ctx context.Context, t *asynq.Task)
 		return nil // Return nil so we don't retry a non-matching email structure
 	}
 
-	slog.Info("Successfully extracted data from email", "context", matchedRule.Context, "data", extractedData)
+	slog.Info("Successfully extracted data from email", "data", extractedData)
 
 	// 5. Write directly to tenant TimescaleDB hypertable
 	query := fmt.Sprintf(`
-		INSERT INTO "%s".email_message_ts (tenant_id, from_email, subject, email_date, parsed_context, parsed_data, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, NOW())
+		INSERT INTO "%s".email_message_ts (tenant_id, from_email, subject, email_date, parsed_data, created_at)
+		VALUES ($1, $2, $3, $4, $5, NOW())
 	`, payload.TenantID)
 
 	parsedDate, err := time.Parse(time.RFC3339, payload.Date)
@@ -1052,7 +1051,7 @@ func (h *TaskHandler) HandleEmailProcessTask(ctx context.Context, t *asynq.Task)
 		parsedDate = time.Now()
 	}
 
-	_, err = h.dbPool.Exec(ctx, query, payload.TenantID, payload.From, payload.Subject, parsedDate, matchedRule.Context, extractedData)
+	_, err = h.dbPool.Exec(ctx, query, payload.TenantID, payload.From, payload.Subject, parsedDate, extractedData)
 	if err != nil {
 		slog.Error("Failed to insert parsed email message into tenant hypertable", "tenant", payload.TenantID, "error", err)
 		return fmt.Errorf("database insert failed: %w", err)
@@ -1078,13 +1077,12 @@ func (h *TaskHandler) HandleEmailProcessTask(ctx context.Context, t *asynq.Task)
 		"from":      sanitizedFrom,
 		"date":      payload.Date,
 		"subject":   payload.Subject,
-		"context":   matchedRule.Context,
 		"data":      extractedData,
 	}
 	eventBytes, _ := json.Marshal(eventPayload)
 	h.queueClient.RedisClient.Publish(ctx, broadcastChannel, string(eventBytes))
 
-	slog.Info("Successfully wrote parsed email to DB and broadcasted event", "tenant", payload.TenantID, "context", matchedRule.Context)
+	slog.Info("Successfully wrote parsed email to DB and broadcasted event", "tenant", payload.TenantID)
 	return nil
 }
 
