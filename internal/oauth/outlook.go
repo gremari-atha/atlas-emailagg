@@ -93,6 +93,7 @@ type MicrosoftTokenResponse struct {
 }
 
 type MicrosoftProfileResponse struct {
+	ID                string `json:"id"`
 	UserPrincipalName string `json:"userPrincipalName"`
 	Mail              string `json:"mail"`
 }
@@ -209,11 +210,12 @@ func (h *OutlookHandler) HandleCallback(w http.ResponseWriter, r *http.Request) 
 	// 4.5. Save credentials JSON in plaintext
 	expiryTime := time.Now().Add(time.Duration(tokenResp.ExpiresIn) * time.Second)
 	creds := model.OutlookCredentials{
-		AccessToken:    tokenResp.AccessToken,
-		RefreshToken:   tokenResp.RefreshToken,
-		TokenType:      tokenResp.TokenType,
-		Expiry:         expiryTime,
-		SubscriptionID: subID,
+		AccessToken:     tokenResp.AccessToken,
+		RefreshToken:    tokenResp.RefreshToken,
+		TokenType:       tokenResp.TokenType,
+		Expiry:          expiryTime,
+		SubscriptionID:  subID,
+		MicrosoftUserID: profile.ID,
 	}
 
 	credsBytes, err := json.Marshal(creds)

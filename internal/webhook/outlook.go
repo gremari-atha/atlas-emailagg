@@ -84,10 +84,24 @@ func (h *OutlookWebhookHandler) HandleWebhook(w http.ResponseWriter, r *http.Req
 		if acc != nil {
 			email = acc.Email
 		} else {
-			// Fallback: parse from resource path format (Users/user-email@outlook.com/Messages/message-id)
+			// Fallback: parse from resource path format (Users/user-email@outlook.com/Messages/message-id or Users/userID/Messages/message-id)
 			parts := strings.Split(notification.Resource, "/")
 			if len(parts) >= 2 && strings.ToLower(parts[0]) == "users" {
-				email = strings.ToLower(parts[1])
+				userIdentifier := strings.ToLower(parts[1])
+				if strings.Contains(userIdentifier, "@") {
+					email = userIdentifier
+				} else {
+					// It's a Microsoft User ID (hex string). Look up by User ID in DB.
+					accByUID, err := db.GetEmailAccountByMicrosoftUserID(r.Context(), h.dbPool, userIdentifier)
+					if err != nil {
+						slog.Error("Database Microsoft User ID lookup failed", "error", err, "user_id", userIdentifier)
+					}
+					if accByUID != nil {
+						email = accByUID.Email
+					} else {
+						slog.Warn("Active Outlook email account not found by Microsoft User ID", "user_id", userIdentifier)
+					}
+				}
 			}
 		}
 

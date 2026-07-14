@@ -39,11 +39,12 @@ type GmailCredentials struct {
 }
 
 type OutlookCredentials struct {
-	AccessToken    string    `json:"access_token"`
-	RefreshToken   string    `json:"refresh_token"`
-	TokenType      string    `json:"token_type"`
-	Expiry         time.Time `json:"expiry"`
-	SubscriptionID string    `json:"subscription_id,omitempty"`
+	AccessToken     string    `json:"access_token"`
+	RefreshToken    string    `json:"refresh_token"`
+	TokenType       string    `json:"token_type"`
+	Expiry          time.Time `json:"expiry"`
+	SubscriptionID  string    `json:"subscription_id,omitempty"`
+	MicrosoftUserID string    `json:"microsoft_user_id,omitempty"`
 }
 
 type IMAPCredentials struct {
