@@ -1073,11 +1073,12 @@ func (h *TaskHandler) HandleEmailProcessTask(ctx context.Context, t *asynq.Task)
 	sanitizedFrom := replacer.Replace(strings.ToLower(payload.From))
 
 	eventPayload := map[string]string{
-		"tenant_id": payload.TenantID,
-		"from":      sanitizedFrom,
-		"date":      payload.Date,
-		"subject":   payload.Subject,
-		"data":      extractedData,
+		"tenant_id":      payload.TenantID,
+		"from":           sanitizedFrom,
+		"date":           payload.Date,
+		"subject":        payload.Subject,
+		"extract_method": matchedRule.ExtractMethod,
+		"data":           extractedData,
 	}
 	eventBytes, _ := json.Marshal(eventPayload)
 	h.queueClient.RedisClient.Publish(ctx, broadcastChannel, string(eventBytes))
