@@ -197,11 +197,16 @@ func (h *TaskHandler) HandleOutlookFetch(ctx context.Context, t *asynq.Task, pay
 			return err
 		}
 
-		credsBytes, _ := json.Marshal(refreshedCreds)
+		creds.AccessToken = refreshedCreds.AccessToken
+		creds.RefreshToken = refreshedCreds.RefreshToken
+		creds.TokenType = refreshedCreds.TokenType
+		creds.Expiry = refreshedCreds.Expiry
+
+		credsBytes, _ := json.Marshal(creds)
 		if err := db.UpdateEmailAccountCredentialsAndStatus(ctx, h.dbPool, acc.ID, string(credsBytes), "ACTIVE"); err != nil {
 			slog.Error("Failed to save refreshed credentials", "error", err)
 		}
-		accessToken = refreshedCreds.AccessToken
+		accessToken = creds.AccessToken
 	}
 
 	// Fetch message headers: subject, from, and receivedDateTime
