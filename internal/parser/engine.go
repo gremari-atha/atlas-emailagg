@@ -35,6 +35,10 @@ func NormalizeHTML(htmlContent string) string {
 // ExtractData extracts the OTP or verification URL using the configured method.
 func ExtractData(normalizedText string, extractMethod string) (string, error) {
 	switch strings.ToUpper(extractMethod) {
+	case "RAW":
+		// Return the entire original/normalized text body
+		return normalizedText, nil
+
 	case "OTP_EXTRACT":
 		// Match 4 to 8 digit numerical codes (OTP)
 		re := regexp.MustCompile(`\b\d{4,8}\b`)

@@ -1023,11 +1023,12 @@ func (h *TaskHandler) HandleEmailProcessTask(ctx context.Context, t *asynq.Task)
 		slog.Info("Processed email did not match any tenant rules, discarding", "subject", payload.Subject, "tenant", payload.TenantID)
 		return nil
 	}
-	// 3. Select body for extraction: raw HTML is needed for URLs to preserve hrefs.
+	// 3. Select body for extraction: raw HTML/Text is needed for URLs/RAW to preserve content.
 	var targetBody string
-	if matchedRule.ExtractMethod == "NETFLIX_URL_EXTRACT" {
+	if matchedRule.ExtractMethod == "NETFLIX_URL_EXTRACT" || matchedRule.ExtractMethod == "RAW" {
 		targetBody = payload.BodyText
 	} else {
+		// Clean and normalize text for OTP pattern matching
 		targetBody = parser.NormalizeHTML(payload.BodyText)
 	}
 
@@ -1042,8 +1043,8 @@ func (h *TaskHandler) HandleEmailProcessTask(ctx context.Context, t *asynq.Task)
 
 	// 5. Write directly to tenant TimescaleDB hypertable
 	query := fmt.Sprintf(`
-		INSERT INTO "%s".email_message_ts (tenant_id, from_email, subject, email_date, parsed_data, created_at)
-		VALUES ($1, $2, $3, $4, $5, NOW())
+		INSERT INTO "%s".email_message_ts (tenant_id, from_email, subject, email_date, parsed_data, extract_method, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, NOW())
 	`, payload.TenantID)
 
 	parsedDate, err := time.Parse(time.RFC3339, payload.Date)
@@ -1051,7 +1052,7 @@ func (h *TaskHandler) HandleEmailProcessTask(ctx context.Context, t *asynq.Task)
 		parsedDate = time.Now()
 	}
 
-	_, err = h.dbPool.Exec(ctx, query, payload.TenantID, payload.From, payload.Subject, parsedDate, extractedData)
+	_, err = h.dbPool.Exec(ctx, query, payload.TenantID, payload.From, payload.Subject, parsedDate, extractedData, matchedRule.ExtractMethod)
 	if err != nil {
 		slog.Error("Failed to insert parsed email message into tenant hypertable", "tenant", payload.TenantID, "error", err)
 		return fmt.Errorf("database insert failed: %w", err)
