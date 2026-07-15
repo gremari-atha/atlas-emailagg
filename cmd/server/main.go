@@ -126,6 +126,7 @@ func main() {
 			webhook.SetupOutlookWebhookRoutes(r, dbPool, qClient)
 		}
 		webhook.SetupResendWebhookRoutes(r, dbPool, qClient)
+		webhook.SetupCloudflareWebhookRoutes(r, dbPool, qClient, ruleCache)
 	})
 
 
