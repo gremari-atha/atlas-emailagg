@@ -1,6 +1,7 @@
 package webhook
 
 import (
+	"bytes"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/mail"
 	"strings"
 	"time"
 
@@ -19,6 +21,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/hibiken/asynq"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/jhillyerd/enmime"
 )
 
 // SetupCloudflareWebhookRoutes registers webhook routes for Cloudflare Email Workers.
@@ -128,21 +131,10 @@ func (h *CloudflareWebhookHandler) HandlePreCheck(w http.ResponseWriter, r *http
 }
 
 func (h *CloudflareWebhookHandler) HandleWebhook(w http.ResponseWriter, r *http.Request) {
-	bodyBytes, err := io.ReadAll(r.Body)
-	if err != nil {
-		slog.Error("Failed to read Cloudflare webhook body", "error", err)
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
+	recipient := strings.ToLower(strings.TrimSpace(r.Header.Get("X-Atlas-Webhook-To")))
+	subject := r.Header.Get("X-Atlas-Webhook-Subject")
+	receivedToken := r.Header.Get("X-Atlas-Webhook-Token")
 
-	var payload CloudflareWebhookPayload
-	if err := json.Unmarshal(bodyBytes, &payload); err != nil {
-		slog.Error("Failed to parse Cloudflare webhook JSON", "error", err)
-		w.WriteHeader(http.StatusBadRequest)
-		return
-	}
-
-	recipient := strings.ToLower(strings.TrimSpace(payload.To))
 	acc, err := db.GetEmailAccountByEmailAndProvider(r.Context(), h.dbPool, recipient, "cloudflare")
 	if err != nil {
 		slog.Error("Database lookup for Cloudflare account failed", "error", err, "recipient", recipient)
@@ -157,7 +149,6 @@ func (h *CloudflareWebhookHandler) HandleWebhook(w http.ResponseWriter, r *http.
 	}
 
 	// Verify webhook token
-	receivedToken := r.Header.Get("X-Atlas-Webhook-Token")
 	var creds struct {
 		Token string `json:"token"`
 	}
@@ -173,12 +164,33 @@ func (h *CloudflareWebhookHandler) HandleWebhook(w http.ResponseWriter, r *http.
 		return
 	}
 
-	// Deduplication check
-	isDup, err := h.isDuplicateMessage(r.Context(), payload.MessageID)
+	// Read binary EML bytes from the HTTP request body
+	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
-		slog.Error("Deduplication check failed", "error", err, "message_id", payload.MessageID)
+		slog.Error("Failed to read Cloudflare webhook body", "error", err)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	// Parse raw EML bytes using enmime
+	envelope, err := enmime.ReadEnvelope(bytes.NewReader(bodyBytes))
+	if err != nil {
+		slog.Error("Failed to parse raw email MIME using enmime", "error", err, "recipient", recipient)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	messageID := envelope.GetHeader("Message-Id")
+	if messageID == "" {
+		messageID = fmt.Sprintf("cf-%d-%d", time.Now().UnixNano(), acc.ID)
+	}
+
+	// Deduplication check
+	isDup, err := h.isDuplicateMessage(r.Context(), messageID)
+	if err != nil {
+		slog.Error("Deduplication check failed", "error", err, "message_id", messageID)
 	} else if isDup {
-		slog.Info("Cloudflare message already processed (duplicate), skipping", "message_id", payload.MessageID, "email", recipient)
+		slog.Info("Cloudflare message already processed (duplicate), skipping", "message_id", messageID, "email", recipient)
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status": "duplicate"}`))
 		return
@@ -194,28 +206,33 @@ func (h *CloudflareWebhookHandler) HandleWebhook(w http.ResponseWriter, r *http.
 
 	var matchedRule *model.SubjectRule
 	for _, rule := range rules {
-		if strings.EqualFold(strings.TrimSpace(payload.Subject), strings.TrimSpace(rule.Subject)) {
+		if strings.EqualFold(strings.TrimSpace(subject), strings.TrimSpace(rule.Subject)) {
 			matchedRule = &rule
 			break
 		}
 	}
 
 	if matchedRule == nil {
-		slog.Info("Cloudflare email subject did not match any tenant rules, discarding", "subject", payload.Subject, "tenant", acc.TenantID)
+		slog.Info("Cloudflare email subject did not match any tenant rules, discarding", "subject", subject, "tenant", acc.TenantID)
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status": "discarded"}`))
 		return
 	}
 
-	// Parse date
-	parsedDate, err := time.Parse(time.RFC3339, payload.Date)
-	if err != nil {
+	// Parse received date from EML header, fallback to now
+	var parsedDate time.Time
+	if dateStr := envelope.GetHeader("Date"); dateStr != "" {
+		if d, err := mail.ParseDate(dateStr); err == nil {
+			parsedDate = d
+		}
+	}
+	if parsedDate.IsZero() {
 		parsedDate = time.Now()
 	}
 
-	bodyText := payload.BodyText
+	bodyText := envelope.Text
 	if bodyText == "" {
-		bodyText = payload.BodyHTML
+		bodyText = envelope.HTML
 	}
 
 	// Enqueue TypeEmailProcess task directly
@@ -223,7 +240,7 @@ func (h *CloudflareWebhookHandler) HandleWebhook(w http.ResponseWriter, r *http.
 		"tenant_id":  acc.TenantID,
 		"account_id": acc.ID,
 		"from":       acc.Email,
-		"subject":    payload.Subject,
+		"subject":    subject,
 		"date":       parsedDate.Format(time.RFC3339),
 		"body_text":  bodyText,
 	}
@@ -243,7 +260,7 @@ func (h *CloudflareWebhookHandler) HandleWebhook(w http.ResponseWriter, r *http.
 		return
 	}
 
-	slog.Info("Successfully enqueued Cloudflare email process task", "email", recipient, "subject", payload.Subject)
+	slog.Info("Successfully enqueued Cloudflare email process task", "email", recipient, "subject", subject)
 	w.WriteHeader(http.StatusAccepted)
 	w.Write([]byte(`{"status": "queued"}`))
 }

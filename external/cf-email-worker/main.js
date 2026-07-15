@@ -1,17 +1,14 @@
 /**
- * Cloudflare Email Routing Worker for Atlas Email Aggregator
+ * Cloudflare Email Routing Worker for Atlas Email Aggregator (Zero-Dependency)
  *
  * This Worker intercepts incoming emails routed via Cloudflare Email Routing,
- * parses the MIME payload using 'postal-mime', and forwards the structured
- * email data to the Atlas Email Aggregator webhook endpoint.
+ * performs an authorization metadata precheck, and forwards the raw MIME EML stream
+ * directly as binary body to the Atlas Email Aggregator webhook endpoint.
  *
  * Deployment requirements:
- * 1. Install postal-mime: `npm install postal-mime`
- * 2. Deploy this worker to Cloudflare.
- * 3. Configure Email Routing in Cloudflare Dashboard to forward emails to this Worker.
+ * 1. Deploy this worker to Cloudflare (directly copy-paste this code into the browser editor).
+ * 2. Configure Email Routing in Cloudflare Dashboard to forward emails to this Worker.
  */
-
-import PostalMime from "postal-mime";
 
 // CONFIGURATION: Set your webhook endpoint and validation token.
 // The validation token must match the one you input in the Atlas Dashboard.
@@ -51,54 +48,29 @@ export default {
         return; // Discard email immediately (saves bandwidth and CPU)
       }
 
-      console.log(`Pre-check matched for subject "${subject}". Parsing full email body...`);
+      console.log(`Pre-check matched for subject "${subject}". Forwarding raw MIME stream...`);
 
-      // 2. Read raw MIME stream from message
-      const rawEmail = await readReadableStream(message.raw);
-
-      // 3. Parse the MIME email using postal-mime
-      const parser = new PostalMime();
-      const parsedEmail = await parser.parse(rawEmail);
-
-      // Extract body text or fall back to HTML content
-      const bodyText = parsedEmail.text || "";
-      const bodyHtml = parsedEmail.html || "";
-
-      // Extract unique Message ID from headers or envelope
-      const messageId = parsedEmail.messageId || `cf-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-      
-      // Parse date or default to now
-      const emailDate = parsedEmail.date || new Date().toISOString();
-
-      // 4. Construct full payload
-      const payload = {
-        message_id: messageId,
-        to: toEmail,
-        from: fromEmail,
-        subject: subject,
-        body_text: bodyText,
-        body_html: bodyHtml,
-        date: emailDate
-      };
-
-      // 5. Send POST webhook request with full payload
+      // 2. Forward the raw MIME email stream directly as binary body
       const response = await fetch(BASE_URL, {
         method: "POST",
         headers: {
-          "Content-Type": "application/json",
-          "X-Atlas-Webhook-Token": VALIDATION_TOKEN
+          "Content-Type": "application/octet-stream",
+          "X-Atlas-Webhook-Token": VALIDATION_TOKEN,
+          "X-Atlas-Webhook-To": toEmail,
+          "X-Atlas-Webhook-From": fromEmail,
+          "X-Atlas-Webhook-Subject": subject
         },
-        body: JSON.stringify(payload)
+        body: message.raw
       });
 
       if (!response.ok) {
         const errorText = await response.text();
         console.error(`Aggregator full webhook failed: ${response.status} - ${errorText}`);
-        message.setReject(`Failed to forward full email: ${response.status}`);
+        message.setReject(`Failed to forward raw email: ${response.status}`);
         return;
       }
 
-      console.log(`Successfully forwarded email ${messageId} to aggregator.`);
+      console.log(`Successfully forwarded raw email stream to aggregator.`);
 
     } catch (err) {
       console.error("Error processing incoming email in worker:", err);
@@ -106,26 +78,3 @@ export default {
     }
   }
 };
-
-/**
- * Helper to convert a ReadableStream into an ArrayBuffer/string for postal-mime
- */
-async function readReadableStream(stream) {
-  const reader = stream.getReader();
-  const chunks = [];
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    chunks.push(value);
-  }
-  
-  // Combine chunks into a single Uint8Array
-  const totalLength = chunks.reduce((acc, val) => acc + val.length, 0);
-  const result = new Uint8Array(totalLength);
-  let offset = 0;
-  for (const chunk of chunks) {
-    result.set(chunk, offset);
-    offset += chunk.length;
-  }
-  return result.buffer;
-}
