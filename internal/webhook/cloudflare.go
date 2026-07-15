@@ -230,9 +230,9 @@ func (h *CloudflareWebhookHandler) HandleWebhook(w http.ResponseWriter, r *http.
 		parsedDate = time.Now()
 	}
 
-	bodyText := envelope.Text
+	bodyText := envelope.HTML
 	if bodyText == "" {
-		bodyText = envelope.HTML
+		bodyText = envelope.Text
 	}
 
 	// Enqueue TypeEmailProcess task directly
